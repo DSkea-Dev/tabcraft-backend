@@ -55,12 +55,22 @@ def get_chords_from_audio(audio_path: str) -> list:
 
 
 def transcribe_audio(audio_path: str) -> dict:
-    """Use whisper to transcribe audio with word-level timestamps."""
+    """Use faster-whisper to transcribe audio with segment timestamps."""
     try:
-        import whisper
-        model = whisper.load_model("base")
-        result = model.transcribe(audio_path, word_timestamps=True)
-        return result
+        from faster_whisper import WhisperModel
+        model = WhisperModel("base", device="cpu", compute_type="int8")
+        segments_iter, info = model.transcribe(audio_path, beam_size=5)
+
+        # Convert to same format as openai-whisper output
+        segments = []
+        for seg in segments_iter:
+            segments.append({
+                "start": seg.start,
+                "end": seg.end,
+                "text": seg.text.strip()
+            })
+
+        return {"segments": segments, "language": info.language}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
