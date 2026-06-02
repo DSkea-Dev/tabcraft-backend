@@ -6,4 +6,6 @@ python-multipart==0.0.9
 faster-whisper==1.0.3
 librosa==0.10.1
 numpy==1.26.4
+scipy==1.11.4
 soundfile==0.12.1
+numba==0.59.1
