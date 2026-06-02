@@ -229,39 +229,44 @@ def build_sections_with_chords(segments, y, sr):
 
 
 def polish_with_claude(title, key, tempo, sections):
+    """
+    Instead of sending the full tab to Claude (which gets truncated),
+    send ONLY the detected chords and ask Claude to return a clean
+    chord progression. Then apply that progression back to the original lyrics.
+    """
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return {"key": key, "capo": "No capo", "sections": sections}
 
-    tab_text = ""
+    # Extract just chord+lyric pairs — one per line
+    all_lines = []
     for s in sections:
-        tab_text += f"[{s['name']}]\n"
         for line in s["lines"]:
-            if line["chords"]:
-                tab_text += f"{line['chords']}\n"
-            tab_text += f"{line['lyrics']}\n"
-        tab_text += "\n"
+            all_lines.append({
+                "chords": line["chords"],
+                "lyrics": line["lyrics"],
+                "section": s["name"]
+            })
+
+    total_lines = len(all_lines)
+    print(f"Total lines to process: {total_lines}")
+
+    # Send chords only to Claude — much shorter prompt
+    chord_list = "\n".join([
+        f"{i+1}. [{l['section']}] chords={l['chords'] or '?'} | lyrics={l['lyrics'][:40]}"
+        for i, l in enumerate(all_lines)
+    ])
 
     prompt = (
-        f'You are an expert guitarist. I auto-detected these chords from audio. '
-        f'Review and correct them into a proper guitar tab.\n\n'
-        f'Song: "{title}"\nDetected key: {key}\nTempo: {tempo}\n\n'
-        f'AUTO-DETECTED TAB:\n{tab_text}\n'
-        f'RULES:\n'
-        f'1. Fix wrong chords so the progression makes musical sense\n'
-        f'2. Each lyric line should have 1-2 chords above it\n'
-        f'3. Use common open chords: G C D Em Am F A E Bm D7 etc\n'
-        f'4. 4-6 total chords for the whole song\n'
-        f'5. Verses repeat same pattern, choruses repeat their own pattern\n'
-        f'6. Determine correct key and capo\n'
-        f'7. First line MUST be: KEY: [key] | CAPO: [capo fret or "No capo"]\n'
-        f'8. Then full tab with [Section Name] headers\n'
-        f'9. Chord format - chord names on line above lyric, spaced where they change:\n'
-        f'G                    D\n'
-        f'Headed down south to the land of the pines\n'
-        f'Em                   C\n'
-        f'Thumbin my way into North Carolina\n\n'
-        f'Return ONLY the key line + tab. No explanation.'
+        f'Song: "{title}", Key: {key}, Tempo: {tempo}\n'
+        f'I detected these chords from audio for each lyric line.\n'
+        f'Fix the chord progressions to be musically correct.\n\n'
+        f'{chord_list}\n\n'
+        f'Return ONLY these two things:\n'
+        f'1. First line: KEY: [correct key] | CAPO: [capo or No capo]\n'
+        f'2. One chord per line number, format: 1. G D\n'
+        f'Give a chord or two for every single line number 1 through {total_lines}.\n'
+        f'Use 4-6 common open chords total. Verses repeat same chords, choruses repeat theirs.'
     )
 
     try:
@@ -274,7 +279,7 @@ def polish_with_claude(title, key, tempo, sections):
             },
             json={
                 "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 4096,
+                "max_tokens": 2000,
                 "messages": [{"role": "user", "content": prompt}]
             },
             timeout=30.0
@@ -285,58 +290,46 @@ def polish_with_claude(title, key, tempo, sections):
             return {"key": key, "capo": "No capo", "sections": sections}
 
         raw = data["content"][0]["text"].strip()
-        lines = raw.split("\n")
+        print(f"Claude chord response length: {len(raw)}")
+        lines_resp = raw.split("\n")
 
+        # Parse key/capo
         final_key = key
         final_capo = "No capo"
-        start_idx = 0
-        if lines and lines[0].startswith("KEY:"):
-            try:
-                parts = lines[0].split("|")
-                final_key = parts[0].replace("KEY:", "").strip()
-                final_capo = parts[1].replace("CAPO:", "").strip() if len(parts) > 1 else "No capo"
-            except Exception:
-                pass
-            start_idx = 1
+        chord_map = {}
 
-        result_sections = []
-        current_section = None
-        current_lines = []
-        pending_chord = ""
-        chord_chars = set("ABCDEFGabcdefg#mb/0123456789dimaug7susMmaj ")
+        for line in lines_resp:
+            line = line.strip()
+            if line.startswith("KEY:"):
+                try:
+                    parts = line.split("|")
+                    final_key = parts[0].replace("KEY:", "").strip()
+                    final_capo = parts[1].replace("CAPO:", "").strip() if len(parts) > 1 else "No capo"
+                except Exception:
+                    pass
+            elif line and line[0].isdigit() and "." in line:
+                try:
+                    num_str, chord_str = line.split(".", 1)
+                    num = int(num_str.strip())
+                    chords = chord_str.strip()
+                    chord_map[num] = chords
+                except Exception:
+                    pass
 
-        for line in lines[start_idx:]:
-            stripped = line.strip()
-            if stripped.startswith("[") and stripped.endswith("]"):
-                if current_section is not None:
-                    result_sections.append({"name": current_section, "lines": current_lines})
-                current_section = stripped[1:-1]
-                current_lines = []
-                pending_chord = ""
-            elif not stripped or current_section is None:
-                continue
-            else:
-                tokens = stripped.split()
-                is_chord_line = (
-                    1 <= len(tokens) <= 6 and
-                    len(stripped) < 30 and
-                    tokens[0][0].isupper() and
-                    all(c in chord_chars for c in stripped)
-                )
-                if is_chord_line:
-                    pending_chord = stripped
-                else:
-                    current_lines.append({"chords": pending_chord, "lyrics": stripped})
-                    pending_chord = ""
+        print(f"Got chords for {len(chord_map)} of {total_lines} lines")
 
-        if current_section and current_lines:
-            result_sections.append({"name": current_section, "lines": current_lines})
+        # Apply chords back to original lyrics preserving all lines
+        section_map = {}
+        for i, l in enumerate(all_lines):
+            sec = l["section"]
+            if sec not in section_map:
+                section_map[sec] = []
+            chord = chord_map.get(i+1, l["chords"])
+            section_map[sec].append({"chords": chord, "lyrics": l["lyrics"]})
 
-        return {
-            "key": final_key,
-            "capo": final_capo,
-            "sections": result_sections if result_sections else sections
-        }
+        result_sections = [{"name": k, "lines": v} for k, v in section_map.items()]
+
+        return {"key": final_key, "capo": final_capo, "sections": result_sections}
 
     except Exception as e:
         print(f"Claude polish error: {e}")
