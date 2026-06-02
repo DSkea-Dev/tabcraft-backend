@@ -39,8 +39,14 @@ def transcribe_audio(audio_path):
     from faster_whisper import WhisperModel
     model = WhisperModel("small", device="cpu", compute_type="int8")
     segments_iter, info = model.transcribe(
-        audio_path, beam_size=5, language="en",
-        condition_on_previous_text=True, no_speech_threshold=0.6
+        audio_path,
+        beam_size=5,
+        language="en",
+        condition_on_previous_text=True,
+        no_speech_threshold=0.8,
+        compression_ratio_threshold=2.4,
+        log_prob_threshold=-1.0,
+        vad_filter=False,
     )
     raw = []
     for seg in segments_iter:
