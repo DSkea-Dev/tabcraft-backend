@@ -99,6 +99,8 @@ def transcribe_audio(audio_path):
                     pass
 
     print(f"Raw segments: {len(all_segments)}")
+    for s in all_segments:
+        print(f"  [{s['start']:.1f}-{s['end']:.1f}] {s['text'][:60]}")
 
     # Split long segments into lyric lines
     segments = []
@@ -208,16 +210,20 @@ def build_sections_with_chords(segments, y, sr):
         name = section_names[section_idx] if section_idx < len(section_names) else f"Section {section_idx+1}"
         sections.append({"name": name, "lines": current_lines})
 
-    # If only 1 section detected, try to split by line count into verse/chorus
-    if len(sections) == 1 and len(sections[0]["lines"]) > 16:
+    print(f"Sections detected by gap analysis: {len(sections)}")
+
+    # If only 1 section, split evenly into verse/chorus/verse/chorus
+    if len(sections) == 1:
         all_lines = sections[0]["lines"]
-        chunk = len(all_lines) // 3
-        sections = []
-        for i, name in enumerate(["Verse 1", "Chorus", "Verse 2"]):
-            start_i = i * chunk
-            end_i = start_i + chunk if i < 2 else len(all_lines)
-            if all_lines[start_i:end_i]:
-                sections.append({"name": name, "lines": all_lines[start_i:end_i]})
+        n = len(all_lines)
+        if n >= 8:
+            q = n // 4
+            sections = [
+                {"name": "Verse 1",  "lines": all_lines[0:q]},
+                {"name": "Chorus",   "lines": all_lines[q:q*2]},
+                {"name": "Verse 2",  "lines": all_lines[q*2:q*3]},
+                {"name": "Chorus",   "lines": all_lines[q*3:]},
+            ]
 
     return sections
 
