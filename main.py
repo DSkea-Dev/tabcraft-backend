@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import tempfile, os, httpx
 
 ANTHROPIC_API = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+# API key read fresh on each request (see add_chords_with_claude)
 
 app = FastAPI()
 
@@ -72,19 +72,23 @@ def group_lyrics_into_sections(segments):
 
 def add_chords_with_claude(title, key, tempo, sections_lyrics):
     """Use Claude to intelligently assign chords to each lyric line."""
-    if not ANTHROPIC_KEY:
-        # No API key — return lyrics without chords
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    print(f"API key present: {bool(api_key)}, length: {len(api_key)}")
+
+    section_names = ["Verse 1", "Chorus", "Verse 2", "Chorus", "Bridge", "Outro"]
+
+    if not api_key:
+        print("No API key — returning lyrics without chords")
         return [
             {
-                "name": ["Verse 1","Chorus","Verse 2","Chorus","Bridge","Outro"][min(i,5)],
+                "name": section_names[min(i, 5)],
                 "lines": [{"chords": "", "lyrics": line} for line in lines]
             }
             for i, lines in enumerate(sections_lyrics)
         ]
 
-    # Build lyrics text for Claude
+    # Build lyrics for Claude
     lyrics_text = ""
-    section_names = ["Verse 1","Chorus","Verse 2","Chorus","Bridge","Outro"]
     for i, lines in enumerate(sections_lyrics):
         name = section_names[i] if i < len(section_names) else f"Section {i+1}"
         lyrics_text += f"[{name}]\n"
@@ -92,28 +96,20 @@ def add_chords_with_claude(title, key, tempo, sections_lyrics):
             lyrics_text += f"{line}\n"
         lyrics_text += "\n"
 
-    prompt = f"""You are a guitarist. Add guitar chords to this song's lyrics.
+    prompt = f"""Add guitar chords to these song lyrics. Song: "{title}", Key: {key}, Tempo: {tempo}.
 
-Song: "{title}"
-Key: {key}
-Tempo: {tempo}
+Use only 4-5 simple chords that fit the key. Place the chord name on its own line directly above the lyric line where it changes. Keep it simple — chords don't need to change every line.
 
-Rules:
-- Use only 3-5 common chords that fit the key (e.g. for G Major use G, Em, C, D)
-- Place chord names on a line ABOVE the lyric line they apply to
-- Chords should change every 1-2 lines typically, not every word
-- Keep it simple and playable — like a real singer-songwriter tab
-- Return ONLY the tab with chords and lyrics, no explanation
+Return ONLY the lyrics with chords above them, using [Section Name] headers. No explanation.
 
 {lyrics_text}"""
 
     try:
-        import httpx
         response = httpx.post(
-            ANTHROPIC_API,
+            "https://api.anthropic.com/v1/messages",
             headers={
                 "Content-Type": "application/json",
-                "x-api-key": ANTHROPIC_KEY,
+                "x-api-key": api_key,
                 "anthropic-version": "2023-06-01"
             },
             json={
@@ -123,42 +119,63 @@ Rules:
             },
             timeout=30.0
         )
+        print(f"Claude API status: {response.status_code}")
         data = response.json()
-        raw = data["content"][0]["text"].strip()
 
-        # Parse the response back into sections/lines
+        if response.status_code != 200:
+            print(f"Claude API error: {data}")
+            return None
+
+        raw = data["content"][0]["text"].strip()
+        print(f"Claude response length: {len(raw)}")
+
+        # Parse response into sections
         result_sections = []
         current_section = None
         current_lines = []
         pending_chord = ""
 
         for line in raw.split("\n"):
-            line = line.rstrip()
-            if line.startswith("[") and line.endswith("]"):
-                if current_section and current_lines:
+            stripped = line.strip()
+
+            # Section header
+            if stripped.startswith("[") and stripped.endswith("]"):
+                if current_section is not None:
                     result_sections.append({"name": current_section, "lines": current_lines})
-                current_section = line[1:-1]
+                current_section = stripped[1:-1]
                 current_lines = []
                 pending_chord = ""
-            elif not current_section:
                 continue
-            else:
-                # Detect if line is mostly chords (short words, no common words)
-                words = line.split()
-                common_words = {"the","and","i","a","to","of","in","is","it","you","that","was","for","on","are","with","he","as","at","be","by","from","or","an","but","not","this","his","they","have","had","what","were","when","we","there","can","if","no","do","my","so","up","out","about","who","get","which","go","me","she","her","him","them","their","all","said","she'd","he'd","they'd","we'd","i'd","i'm","you're","it's"}
-                is_chord_line = len(words) > 0 and len(words) <= 8 and all(
-                    len(w) <= 4 and w[0].isupper() and w.lower() not in common_words
-                    for w in words if w
-                )
-                if is_chord_line and line.strip():
-                    pending_chord = line.strip()
-                elif line.strip():
-                    current_lines.append({"chords": pending_chord, "lyrics": line.strip()})
-                    pending_chord = ""
 
-        if current_section and current_lines:
+            if current_section is None:
+                continue
+
+            if not stripped:
+                continue
+
+            # Is this a chord line? — all tokens are chord-like (start with uppercase, short, no lowercase words)
+            tokens = stripped.split()
+            chord_chars = set("ABCDEFGabcdefg#mb/0123456789dimaugsusMmaj")
+            is_chord_line = (
+                1 <= len(tokens) <= 6 and
+                all(
+                    len(t) <= 5 and
+                    t[0].isupper() and
+                    all(c in chord_chars for c in t)
+                    for t in tokens
+                )
+            )
+
+            if is_chord_line:
+                pending_chord = stripped
+            else:
+                current_lines.append({"chords": pending_chord, "lyrics": stripped})
+                pending_chord = ""
+
+        if current_section is not None and current_lines:
             result_sections.append({"name": current_section, "lines": current_lines})
 
+        print(f"Parsed {len(result_sections)} sections")
         return result_sections if result_sections else None
 
     except Exception as e:
