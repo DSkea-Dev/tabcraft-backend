@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TabCraft — AI Guitar Tab Generator</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0f0e0c; color: #e8e0d0; font-family: 'Courier New', monospace; min-height: 100vh; }
+  
+  header { border-bottom: 1px solid #2a2620; padding: 16px 20px; display: flex; align-items: center; justify-content: space-between; }
+  .logo { display: flex; align-items: center; gap: 12px; }
+  .logo-icon { width: 38px; height: 38px; background: #c8a96e; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 20px; }
+  .logo-title { font-size: 18px; font-weight: bold; letter-spacing: 2px; color: #c8a96e; font-family: Georgia, serif; }
+  .logo-sub { font-size: 10px; color: #6b6458; letter-spacing: 3px; }
+  #backend-btn { background: none; border: 1px solid #2a2620; padding: 7px 13px; border-radius: 4px; cursor: pointer; font-size: 11px; letter-spacing: 1px; font-family: 'Courier New', monospace; }
+  
+  main { max-width: 800px; margin: 0 auto; padding: 28px 16px; }
+  
+  /* Setup modal */
+  #setup-panel { background: #13120f; border: 1px solid #c8a96e44; border-radius: 10px; padding: 24px; margin-bottom: 24px; }
+  #setup-panel h2 { font-size: 15px; color: #c8a96e; font-family: Georgia, serif; margin-bottom: 8px; }
+  #setup-panel p { font-size: 12px; color: #6b6458; margin-bottom: 16px; line-height: 1.7; }
+  #setup-panel .example { color: #8bc4e8; }
+  #backend-input { width: 100%; background: #0a0908; border: 1px solid #2a2620; color: #e8e0d0; padding: 10px 14px; border-radius: 4px; font-size: 13px; font-family: monospace; margin-bottom: 12px; }
+  .btn-row { display: flex; gap: 8px; }
+  .btn-primary { background: #c8a96e; border: none; color: #0f0e0c; padding: 9px 20px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; letter-spacing: 1px; font-family: 'Courier New', monospace; }
+  .btn-secondary { background: none; border: 1px solid #2a2620; color: #6b6458; padding: 9px 20px; border-radius: 4px; cursor: pointer; font-size: 12px; font-family: 'Courier New', monospace; }
+
+  /* No backend warning */
+  #no-backend { background: #130d00; border: 1px solid #5a3a00; border-radius: 8px; padding: 16px 20px; margin-bottom: 20px; }
+  #no-backend .warn-title { color: #e0a030; font-size: 13px; margin-bottom: 8px; }
+  #no-backend p { color: #8a7040; font-size: 12px; line-height: 1.7; margin-bottom: 12px; }
+
+  /* Upload zone */
+  #upload-zone { border: 2px dashed #3a342c; border-radius: 10px; padding: 52px 24px; text-align: center; cursor: pointer; background: #13120f; transition: all 0.2s; margin-bottom: 16px; }
+  #upload-zone.dragging { border-color: #c8a96e; background: #1a1710; }
+  #upload-zone.disabled { opacity: 0.4; pointer-events: none; }
+  #upload-zone .big-icon { font-size: 40px; margin-bottom: 10px; }
+  #upload-zone h2 { font-size: 16px; color: #c8a96e; margin-bottom: 5px; font-family: Georgia, serif; font-weight: normal; }
+  #upload-zone p { color: #6b6458; font-size: 13px; margin-bottom: 18px; }
+  .browse-btn { display: inline-block; padding: 8px 22px; border: 1px solid #c8a96e; color: #c8a96e; border-radius: 4px; font-size: 12px; letter-spacing: 2px; }
+
+  /* Loading */
+  #loading { text-align: center; padding: 52px 24px; background: #13120f; border-radius: 10px; border: 1px solid #2a2620; }
+  #loading .spin { font-size: 32px; display: inline-block; animation: spin 1.5s linear infinite; margin-bottom: 14px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #loading h2 { color: #c8a96e; font-size: 14px; font-family: Georgia, serif; font-weight: normal; margin-bottom: 6px; }
+  #loading p { color: #6b6458; font-size: 12px; line-height: 1.8; }
+
+  /* Error */
+  #error-box { background: #180f0f; border: 1px solid #5a2020; border-radius: 8px; padding: 16px 20px; }
+  #error-box p { color: #e07070; font-size: 13px; line-height: 1.7; word-break: break-word; margin-bottom: 12px; }
+
+  /* Tab output */
+  #tab-output { display: none; }
+  .tab-header { background: #13120f; border: 1px solid #2a2620; border-radius: 8px 8px 0 0; padding: 16px 20px; display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 10px; }
+  .tab-title { font-size: 19px; color: #e8e0d0; font-family: Georgia, serif; margin-bottom: 5px; }
+  .tab-meta { display: flex; gap: 14px; flex-wrap: wrap; }
+  .tab-meta span { font-size: 12px; }
+  .tab-meta .label { color: #6b6458; letter-spacing: 2px; }
+  .tab-meta .val { color: #c8a96e; }
+  .tab-actions { display: flex; gap: 8px; }
+  .strum-bar { background: #111009; border: 1px solid #2a2620; border-top: none; padding: 12px 20px; }
+  .strum-label { font-size: 10px; color: #6b6458; letter-spacing: 3px; margin-bottom: 7px; }
+  .strum-beats { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+  .beat { background: #1e1c18; border: 1px solid #2a2620; border-radius: 4px; padding: 4px 10px; font-size: 14px; font-weight: bold; }
+  .beat.down { color: #c8a96e; }
+  .beat.up { color: #8bc4e8; }
+  .beat.mute { color: #4a4840; }
+  .strum-desc { color: #6b6458; font-size: 12px; margin-left: 6px; }
+  .tab-body { background: #0d0c0a; border: 1px solid #2a2620; border-top: none; border-radius: 0 0 8px 8px; padding: 18px; }
+  .section { margin-bottom: 26px; }
+  .section-name { font-size: 10px; letter-spacing: 3px; color: #c8a96e; margin-bottom: 11px; border-bottom: 1px solid #1e1c18; padding-bottom: 5px; }
+  .line { margin-bottom: 14px; }
+  .chords { font-size: 13px; color: #c8a96e; white-space: pre; letter-spacing: 1px; margin-bottom: 2px; }
+  .lyrics { font-size: 13px; color: #b0a898; white-space: pre-wrap; line-height: 1.6; }
+  .tab-notes { padding: 10px 14px; background: #13120f; border-radius: 6px; border-left: 3px solid #2a2620; margin-top: 8px; }
+  .tab-notes .notes-label { font-size: 10px; color: #6b6458; letter-spacing: 2px; margin-bottom: 4px; }
+  .tab-notes p { font-size: 12px; color: #8a8070; line-height: 1.7; }
+
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">🎸</div>
+    <div>
+      <div class="logo-title">TABCRAFT</div>
+      <div class="logo-sub">AI GUITAR TAB GENERATOR</div>
+    </div>
+  </div>
+  <button id="backend-btn" onclick="showSetup()">⚠ SET BACKEND</button>
+</header>
+
+<main>
+
+  <!-- Setup panel -->
+  <div id="setup-panel" class="hidden">
+    <h2>Connect your Backend</h2>
+    <p>Paste your Railway URL here. It looks like:<br>
+    <span class="example">https://web-production-2ed3.up.railway.app</span></p>
+    <input id="backend-input" type="url" placeholder="https://your-app.up.railway.app" />
+    <div class="btn-row">
+      <button class="btn-primary" onclick="saveBackend()">SAVE</button>
+      <button class="btn-secondary" onclick="hideSetup()">CANCEL</button>
+    </div>
+  </div>
+
+  <!-- No backend warning -->
+  <div id="no-backend">
+    <div class="warn-title">⚠ Backend not configured</div>
+    <p>Set your Railway backend URL to start analyzing your songs.</p>
+    <button class="btn-primary" onclick="showSetup()">SET BACKEND URL</button>
+  </div>
+
+  <!-- Upload zone -->
+  <div id="upload-zone" class="disabled"
+    ondragover="event.preventDefault(); this.classList.add('dragging')"
+    ondragleave="this.classList.remove('dragging')"
+    ondrop="handleDrop(event)"
+    onclick="document.getElementById('file-input').click()">
+    <div class="big-icon">🎵</div>
+    <h2>Drop your song here</h2>
+    <p>MP3 or WAV — your original recordings</p>
+    <div class="browse-btn">BROWSE FILES</div>
+    <input id="file-input" type="file" accept=".mp3,.wav,.m4a,.ogg,audio/*" style="display:none" onchange="handleFile(this.files[0])">
+  </div>
+
+  <!-- Loading -->
+  <div id="loading" class="hidden">
+    <div class="spin">🎼</div>
+    <h2>Analyzing your song...</h2>
+    <p>Transcribing lyrics with Whisper<br>Detecting chords with Basic Pitch<br>Building your tab...</p>
+    <p id="loading-filename" style="color:#2a2620; font-size:11px; margin-top:10px;"></p>
+  </div>
+
+  <!-- Error -->
+  <div id="error-box" class="hidden">
+    <p id="error-msg"></p>
+    <button class="btn-secondary" onclick="resetApp()">← Try Again</button>
+  </div>
+
+  <!-- Tab output -->
+  <div id="tab-output">
+    <div class="tab-header">
+      <div>
+        <div class="tab-title" id="out-title"></div>
+        <div class="tab-meta" id="out-meta"></div>
+      </div>
+      <div class="tab-actions">
+        <button class="btn-secondary" id="copy-btn" onclick="copyTab()">COPY TAB</button>
+        <button class="btn-primary" onclick="resetApp()">NEW SONG</button>
+      </div>
+    </div>
+    <div class="strum-bar">
+      <div class="strum-label">STRUMMING PATTERN</div>
+      <div class="strum-beats" id="out-strum"></div>
+    </div>
+    <div class="tab-body" id="out-sections"></div>
+  </div>
+
+</main>
+
+<script>
+  let backendUrl = localStorage.getItem('tabcraft_backend') || '';
+  let currentTab = null;
+
+  function init() {
+    if (backendUrl) {
+      document.getElementById('no-backend').classList.add('hidden');
+      document.getElementById('upload-zone').classList.remove('disabled');
+      document.getElementById('backend-btn').textContent = '✓ BACKEND SET';
+      document.getElementById('backend-btn').style.color = '#80c880';
+    }
+  }
+
+  function showSetup() {
+    document.getElementById('backend-input').value = backendUrl;
+    document.getElementById('setup-panel').classList.remove('hidden');
+  }
+
+  function hideSetup() {
+    document.getElementById('setup-panel').classList.add('hidden');
+  }
+
+  function saveBackend() {
+    const url = document.getElementById('backend-input').value.trim().replace(/\/$/, '');
+    if (!url) return;
+    localStorage.setItem('tabcraft_backend', url);
+    backendUrl = url;
+    hideSetup();
+    document.getElementById('no-backend').classList.add('hidden');
+    document.getElementById('upload-zone').classList.remove('disabled');
+    document.getElementById('backend-btn').textContent = '✓ BACKEND SET';
+    document.getElementById('backend-btn').style.color = '#80c880';
+  }
+
+  function handleDrop(e) {
+    e.preventDefault();
+    document.getElementById('upload-zone').classList.remove('dragging');
+    const f = e.dataTransfer.files[0];
+    if (f) handleFile(f);
+  }
+
+  async function handleFile(file) {
+    if (!backendUrl) { showSetup(); return; }
+
+    document.getElementById('upload-zone').classList.add('hidden');
+    document.getElementById('error-box').classList.add('hidden');
+    document.getElementById('tab-output').style.display = 'none';
+    document.getElementById('loading').classList.remove('hidden');
+    document.getElementById('loading-filename').textContent = file.name;
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await fetch(`${backendUrl}/analyze`, {
+        method: 'POST',
+        body: formData
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || `Server error ${response.status}`);
+      if (!data.sections) throw new Error('Invalid response from server');
+
+      currentTab = data;
+      renderTab(data);
+    } catch (err) {
+      showError(err.message);
+    } finally {
+      document.getElementById('loading').classList.add('hidden');
+    }
+  }
+
+  function renderTab(tab) {
+    document.getElementById('out-title').textContent = tab.title;
+
+    const meta = [['KEY', tab.key], ['TEMPO', tab.tempo], ['TIME', tab.timeSignature], ['CAPO', tab.capo]];
+    document.getElementById('out-meta').innerHTML = meta.map(([l, v]) =>
+      `<span><span class="label">${l} </span><span class="val">${v}</span></span>`
+    ).join('');
+
+    const beats = (tab.strummingPattern || 'D DU UDU').split(' ').filter(Boolean);
+    document.getElementById('out-strum').innerHTML = beats.map(b => {
+      const cls = b.includes('D') ? 'down' : b === 'x' ? 'mute' : 'up';
+      return `<div class="beat ${cls}">${b}</div>`;
+    }).join('') + `<span class="strum-desc">${tab.strummingDescription || ''}</span>`;
+
+    let html = '';
+    tab.sections.forEach(section => {
+      html += `<div class="section">`;
+      html += `<div class="section-name">[${(section.name || 'Section').toUpperCase()}]</div>`;
+      (section.lines || []).forEach(line => {
+        html += `<div class="line">`;
+        if (line.chords) html += `<div class="chords">${escHtml(line.chords)}</div>`;
+        html += `<div class="lyrics">${escHtml(line.lyrics)}</div>`;
+        html += `</div>`;
+      });
+      html += `</div>`;
+    });
+    if (tab.notes) {
+      html += `<div class="tab-notes"><div class="notes-label">NOTES</div><p>${escHtml(tab.notes)}</p></div>`;
+    }
+    document.getElementById('out-sections').innerHTML = html;
+    document.getElementById('tab-output').style.display = 'block';
+  }
+
+  function escHtml(str) {
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function showError(msg) {
+    document.getElementById('error-msg').innerHTML = `<strong>Error:</strong> ${msg}`;
+    document.getElementById('error-box').classList.remove('hidden');
+    document.getElementById('upload-zone').classList.remove('hidden');
+  }
+
+  function resetApp() {
+    currentTab = null;
+    document.getElementById('tab-output').style.display = 'none';
+    document.getElementById('error-box').classList.add('hidden');
+    document.getElementById('upload-zone').classList.remove('hidden');
+    document.getElementById('file-input').value = '';
+  }
+
+  function copyTab() {
+    if (!currentTab) return;
+    const tab = currentTab;
+    const lines = [
+      `TITLE: ${tab.title}`,
+      `Key: ${tab.key} | Tempo: ${tab.tempo} | Time: ${tab.timeSignature} | ${tab.capo}`,
+      `Strumming: ${tab.strummingPattern} — ${tab.strummingDescription}`,
+      ''
+    ];
+    tab.sections.forEach(s => {
+      lines.push(`[${s.name}]`);
+      s.lines.forEach(l => { if (l.chords) lines.push(l.chords); lines.push(l.lyrics); lines.push(''); });
+    });
+    if (tab.notes) lines.push(`Notes: ${tab.notes}`);
+    navigator.clipboard.writeText(lines.join('\n'));
+    const btn = document.getElementById('copy-btn');
+    btn.textContent = '✓ COPIED';
+    setTimeout(() => btn.textContent = 'COPY TAB', 2000);
+  }
+
+  init();
+</script>
+</body>
+</html>
