@@ -39,17 +39,9 @@ def detect_key_and_tempo(audio_path: str) -> dict:
     import numpy as np
     y, sr = librosa.load(audio_path)
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
-    chroma_mean = chroma.mean(axis=1)
-    key_idx = int(chroma_mean.argmax())
-    note_names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-    major_profile = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
-    minor_profile = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
-    major_corr = float(np.corrcoef(chroma_mean, np.roll(major_profile, key_idx))[0, 1])
-    minor_corr = float(np.corrcoef(chroma_mean, np.roll(minor_profile, key_idx))[0, 1])
-    mode = "Major" if major_corr > minor_corr else "Minor"
+    # Return tempo only — let Claude determine key/capo from musical context
     return {
-        "key": f"{note_names[key_idx]} {mode}",
+        "key": "unknown",
         "tempo": f"{int(round(float(tempo)))} BPM"
     }
 
@@ -96,23 +88,29 @@ def add_chords_with_claude(title, key, tempo, sections_lyrics):
             lyrics_text += f"{line}\n"
         lyrics_text += "\n"
 
-    prompt = f"""You are an expert guitarist writing a chord chart for an original song. Add guitar chords to these lyrics.
+    prompt = f"""You are an expert guitarist. Add guitar chords to these song lyrics and determine the key and capo.
 
 Song: "{title}"
-Detected key: {key}
 Tempo: {tempo}
 
-RULES:
-- Choose chords that genuinely fit the key and feel of the song
-- Use common open guitar chords where possible (G, C, D, Em, Am, F, A, E, Bm etc)
-- Typically 4-6 different chords for a whole song is plenty — don't overcomplicate it
-- Chords change frequently — typically every line or every half line, like a real guitar tab
-- Do NOT put one chord for every 2-3 lines — that is too sparse
-- Verses and choruses should each have a consistent repeating chord pattern
-- Put the chord name alone on its own line directly ABOVE the lyric line where the chord starts
-- Every section must have chords — don't leave any section without them
-- Keep the same [Section Name] headers exactly as given
-- Return ONLY the chords and lyrics with section headers — no explanation, no preamble
+YOUR TASKS:
+1. Determine the best guitar key and capo position for this song
+2. Add chords above each lyric line — typically 2 chords per line
+3. Use common open chord shapes (G, C, D, Em, Am, F, A, E, Bm, D7 etc)
+4. Keep 4-6 chords total for the whole song
+5. Verses repeat the same pattern, choruses repeat their own pattern
+
+CHORD FORMAT — put chords on a line above the lyrics, spaced to align where they change:
+G                    D
+Headed down south to the land of the pines
+Em                   C
+And I'm thumbin' my way into North Carolina
+
+FIRST LINE of your response must be:
+KEY: [key] | CAPO: [capo fret or "No capo"]
+
+Then the full chord chart with [Section Name] headers.
+Return ONLY the key line + chord chart, no other explanation.
 
 {lyrics_text}"""
 
@@ -140,6 +138,26 @@ RULES:
 
         raw = data["content"][0]["text"].strip()
         print(f"Claude response length: {len(raw)}")
+
+        # Extract KEY and CAPO from first line if present
+        lines_raw = raw.split("\n")
+        detected_key = None
+        detected_capo = None
+        if lines_raw and lines_raw[0].startswith("KEY:"):
+            first_line = lines_raw[0]
+            try:
+                key_part = first_line.split("|")[0].replace("KEY:", "").strip()
+                capo_part = first_line.split("|")[1].replace("CAPO:", "").strip() if "|" in first_line else "No capo"
+                detected_key = key_part
+                detected_capo = capo_part
+            except:
+                pass
+            raw = "\n".join(lines_raw[1:]).strip()
+
+        # Store for returning in result
+        if detected_key:
+            add_chords_with_claude._last_key = detected_key
+            add_chords_with_claude._last_capo = detected_capo
 
         # Parse response into sections
         result_sections = []
@@ -201,13 +219,13 @@ def detect_strumming(tempo_bpm: str) -> dict:
     except:
         bpm = 90
     if bpm < 70:
-        return {"pattern": "D   D   D   D", "description": "Slow, deliberate downstrokes"}
+        return {"pattern": "D D D D", "description": "Slow, deliberate downstrokes"}
     elif bpm < 100:
         return {"pattern": "D DU UDU", "description": "Gentle folk strum"}
     elif bpm < 130:
-        return {"pattern": "D DU DU", "description": "Medium driving strum"}
+        return {"pattern": "D D DU UD", "description": "Medium driving strum"}
     else:
-        return {"pattern": "D D DU DU", "description": "Upbeat rhythmic strum"}
+        return {"pattern": "D D UD UD", "description": "Upbeat rhythmic strum"}
 
 
 @app.get("/")
@@ -289,12 +307,15 @@ async def analyze(file: UploadFile = File(...)):
 
         strum = detect_strumming(key_tempo["tempo"])
 
+        final_key = getattr(add_chords_with_claude, "_last_key", key_tempo["key"])
+        final_capo = getattr(add_chords_with_claude, "_last_capo", "No capo")
+
         return {
             "title": song_title,
-            "key": key_tempo["key"],
+            "key": final_key,
             "tempo": key_tempo["tempo"],
             "timeSignature": "4/4",
-            "capo": "No capo",
+            "capo": final_capo,
             "strummingPattern": strum["pattern"],
             "strummingDescription": strum["description"],
             "sections": sections,
