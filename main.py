@@ -20,8 +20,8 @@ app.add_middleware(
 
 def transcribe_audio(audio_path: str) -> dict:
     from faster_whisper import WhisperModel
-    model = WhisperModel("base", device="cpu", compute_type="int8")
-    segments_iter, info = model.transcribe(audio_path, beam_size=5)
+    model = WhisperModel("small", device="cpu", compute_type="int8")
+    segments_iter, info = model.transcribe(audio_path, beam_size=5, language="en", condition_on_previous_text=True, no_speech_threshold=0.6)
     segments = []
     for seg in segments_iter:
         text = seg.text.strip()
@@ -96,37 +96,23 @@ def add_chords_with_claude(title, key, tempo, sections_lyrics):
             lyrics_text += f"{line}\n"
         lyrics_text += "\n"
 
-    # Map detected key to common guitar-friendly chords
-    key_chord_map = {
-        "C Major":  "C, Am, F, G",
-        "G Major":  "G, Em, C, D",
-        "D Major":  "D, Bm, G, A",
-        "A Major":  "A, F#m, D, E",
-        "E Major":  "G, Em, C, D",  # likely capo song, use G shapes
-        "F Major":  "F, Dm, Bb, C",
-        "Bb Major": "Bb, Gm, Eb, F",
-        "A Minor":  "Am, F, C, G",
-        "E Minor":  "Em, C, G, D",
-        "D Minor":  "Dm, Bb, F, C",
-        "B Minor":  "Bm, G, D, A",
-        "F# Minor": "F#m, D, A, E",
-    }
-    suggested_chords = key_chord_map.get(key, "G, Em, C, D")
-
-    prompt = f"""You are an expert guitarist writing a chord chart. Add chords to these lyrics.
+    prompt = f"""You are an expert guitarist writing a chord chart for an original song. Add guitar chords to these lyrics.
 
 Song: "{title}"
-Key: {key}
-Suggested chords to use: {suggested_chords}
+Detected key: {key}
+Tempo: {tempo}
 
 RULES:
-- Use ONLY the 4 suggested chords above — no others
-- Chords change every 1-2 lines, not every word
-- Put the chord name alone on its own line directly ABOVE the lyric line where it starts
-- Every section needs chords — don't leave any section without chords
-- Keep the same [Section Name] headers
-- Verses and choruses typically repeat the same chord pattern
-- Return ONLY chords + lyrics, no explanation
+- Choose chords that genuinely fit the key and feel of the song
+- Use common open guitar chords where possible (G, C, D, Em, Am, F, A, E, Bm etc)
+- Typically 4-6 different chords for a whole song is plenty — don't overcomplicate it
+- Chords change frequently — typically every line or every half line, like a real guitar tab
+- Do NOT put one chord for every 2-3 lines — that is too sparse
+- Verses and choruses should each have a consistent repeating chord pattern
+- Put the chord name alone on its own line directly ABOVE the lyric line where the chord starts
+- Every section must have chords — don't leave any section without them
+- Keep the same [Section Name] headers exactly as given
+- Return ONLY the chords and lyrics with section headers — no explanation, no preamble
 
 {lyrics_text}"""
 
