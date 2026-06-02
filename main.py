@@ -126,14 +126,18 @@ def build_sections_with_chords(segments, y, sr):
         lyrics = seg["text"].strip()
         if not lyrics:
             continue
-        if start - prev_end > 2.0 and current_lines:
+
+        # Only split into new section on a gap > 4 seconds (more lenient)
+        if start - prev_end > 4.0 and current_lines:
             name = section_names[section_idx] if section_idx < len(section_names) else f"Section {section_idx+1}"
             sections.append({"name": name, "lines": current_lines})
             current_lines = []
             section_idx += 1
 
-        chord1 = detect_chord_at_time(y, sr, start, start + (end-start)*0.5)
-        chord2 = detect_chord_at_time(y, sr, start + (end-start)*0.5, end)
+        # Split each line into two halves for chord detection
+        mid = start + (end - start) * 0.5
+        chord1 = detect_chord_at_time(y, sr, start, mid)
+        chord2 = detect_chord_at_time(y, sr, mid, end)
 
         if chord2 and chord2 != chord1:
             chord_line = f"{chord1:<20}{chord2}"
@@ -143,9 +147,21 @@ def build_sections_with_chords(segments, y, sr):
         current_lines.append({"chords": chord_line, "lyrics": lyrics})
         prev_end = end
 
+    # Always save remaining lines even if no gap was found
     if current_lines:
         name = section_names[section_idx] if section_idx < len(section_names) else f"Section {section_idx+1}"
         sections.append({"name": name, "lines": current_lines})
+
+    # If only 1 section detected, try to split by line count into verse/chorus
+    if len(sections) == 1 and len(sections[0]["lines"]) > 16:
+        all_lines = sections[0]["lines"]
+        chunk = len(all_lines) // 3
+        sections = []
+        for i, name in enumerate(["Verse 1", "Chorus", "Verse 2"]):
+            start_i = i * chunk
+            end_i = start_i + chunk if i < 2 else len(all_lines)
+            if all_lines[start_i:end_i]:
+                sections.append({"name": name, "lines": all_lines[start_i:end_i]})
 
     return sections
 
@@ -335,7 +351,17 @@ async def analyze(file: UploadFile = File(...)):
         print(f"Key: {key}")
 
         print("Detecting tempo...")
-        tempo_str = f"{int(round(float(librosa.beat.beat_track(y=y, sr=sr)[0])))} BPM"
+        import numpy as np
+        # Use onset strength for more accurate tempo on sung audio
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+        tempo_val = librosa.beat.tempo(onset_envelope=onset_env, sr=sr)
+        bpm = int(round(float(tempo_val[0] if hasattr(tempo_val, "__len__") else tempo_val)))
+        # If detected BPM seems wrong, try half/double
+        if bpm < 60:
+            bpm = bpm * 2
+        elif bpm > 200:
+            bpm = bpm // 2
+        tempo_str = f"{bpm} BPM"
         print(f"Tempo: {tempo_str}")
 
         print("Detecting chords per line...")
