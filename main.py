@@ -36,30 +36,80 @@ def split_long_segment(text, start, end):
 
 
 def transcribe_audio(audio_path):
+    import librosa
+    import soundfile as sf
+    import tempfile
     from faster_whisper import WhisperModel
+
+    # Load full audio to get duration
+    y, sr = librosa.load(audio_path, sr=16000, mono=True)
+    total_duration = len(y) / sr
+    print(f"Audio duration: {total_duration:.1f}s")
+
     model = WhisperModel("small", device="cpu", compute_type="int8")
-    segments_iter, info = model.transcribe(
-        audio_path,
-        beam_size=5,
-        language="en",
-        condition_on_previous_text=True,
-        no_speech_threshold=0.8,
-        compression_ratio_threshold=2.4,
-        log_prob_threshold=-1.0,
-        vad_filter=False,
-    )
-    raw = []
-    for seg in segments_iter:
-        text = seg.text.strip()
-        if text:
-            raw.append({"start": float(seg.start), "end": float(seg.end), "text": text})
+
+    # Process in 60-second chunks to avoid memory issues
+    chunk_size = 60
+    all_segments = []
+
+    if total_duration <= chunk_size:
+        # Short song — process all at once
+        chunks = [(0, total_duration, audio_path)]
+    else:
+        # Split into chunks
+        chunks = []
+        offset = 0
+        while offset < total_duration:
+            end = min(offset + chunk_size, total_duration)
+            start_sample = int(offset * sr)
+            end_sample = int(end * sr)
+            chunk_audio = y[start_sample:end_sample]
+
+            # Save chunk to temp file
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+            sf.write(tmp.name, chunk_audio, sr)
+            tmp.close()
+            chunks.append((offset, end, tmp.name))
+            offset += chunk_size
+
+    for chunk_start, chunk_end, chunk_path in chunks:
+        is_temp = chunk_path != audio_path
+        try:
+            segs_iter, info = model.transcribe(
+                chunk_path,
+                beam_size=3,
+                language="en",
+                condition_on_previous_text=False,
+                no_speech_threshold=0.8,
+                vad_filter=False,
+            )
+            for seg in segs_iter:
+                text = seg.text.strip()
+                if text:
+                    all_segments.append({
+                        "start": float(seg.start) + chunk_start,
+                        "end": float(seg.end) + chunk_start,
+                        "text": text
+                    })
+        finally:
+            if is_temp:
+                try:
+                    os.unlink(chunk_path)
+                except Exception:
+                    pass
+
+    print(f"Raw segments: {len(all_segments)}")
+
+    # Split long segments into lyric lines
     segments = []
-    for seg in raw:
+    for seg in all_segments:
         if len(seg["text"].split()) > 10:
             segments.extend(split_long_segment(seg["text"], seg["start"], seg["end"]))
         else:
             segments.append(seg)
-    return {"segments": segments, "language": info.language}
+
+    print(f"Final segments after splitting: {len(segments)}")
+    return {"segments": segments, "language": "en"}
 
 
 def detect_tempo(audio_path):
