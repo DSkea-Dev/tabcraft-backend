@@ -96,11 +96,37 @@ def add_chords_with_claude(title, key, tempo, sections_lyrics):
             lyrics_text += f"{line}\n"
         lyrics_text += "\n"
 
-    prompt = f"""Add guitar chords to these song lyrics. Song: "{title}", Key: {key}, Tempo: {tempo}.
+    # Map detected key to common guitar-friendly chords
+    key_chord_map = {
+        "C Major":  "C, Am, F, G",
+        "G Major":  "G, Em, C, D",
+        "D Major":  "D, Bm, G, A",
+        "A Major":  "A, F#m, D, E",
+        "E Major":  "G, Em, C, D",  # likely capo song, use G shapes
+        "F Major":  "F, Dm, Bb, C",
+        "Bb Major": "Bb, Gm, Eb, F",
+        "A Minor":  "Am, F, C, G",
+        "E Minor":  "Em, C, G, D",
+        "D Minor":  "Dm, Bb, F, C",
+        "B Minor":  "Bm, G, D, A",
+        "F# Minor": "F#m, D, A, E",
+    }
+    suggested_chords = key_chord_map.get(key, "G, Em, C, D")
 
-Use only 4-5 simple chords that fit the key. Place the chord name on its own line directly above the lyric line where it changes. Keep it simple — chords don't need to change every line.
+    prompt = f"""You are an expert guitarist writing a chord chart. Add chords to these lyrics.
 
-Return ONLY the lyrics with chords above them, using [Section Name] headers. No explanation.
+Song: "{title}"
+Key: {key}
+Suggested chords to use: {suggested_chords}
+
+RULES:
+- Use ONLY the 4 suggested chords above — no others
+- Chords change every 1-2 lines, not every word
+- Put the chord name alone on its own line directly ABOVE the lyric line where it starts
+- Every section needs chords — don't leave any section without chords
+- Keep the same [Section Name] headers
+- Verses and choruses typically repeat the same chord pattern
+- Return ONLY chords + lyrics, no explanation
 
 {lyrics_text}"""
 
@@ -205,6 +231,37 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/test-claude")
+async def test_claude():
+    """Test endpoint to verify Claude API connectivity."""
+    import httpx
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return {"status": "error", "message": "No ANTHROPIC_API_KEY set in environment"}
+    try:
+        response = httpx.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01"
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 20,
+                "messages": [{"role": "user", "content": "Say OK"}]
+            },
+            timeout=15.0
+        )
+        data = response.json()
+        if response.status_code == 200:
+            return {"status": "ok", "message": "Claude API working", "response": data["content"][0]["text"]}
+        else:
+            return {"status": "error", "code": response.status_code, "detail": data}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...)):
