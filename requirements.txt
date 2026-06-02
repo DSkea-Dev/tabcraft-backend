@@ -4,6 +4,5 @@ fastapi==0.111.0
 uvicorn==0.29.0
 python-multipart==0.0.9
 faster-whisper==1.0.3
-basic-pitch==0.3.2
 librosa==0.10.1
 numpy==1.26.4
