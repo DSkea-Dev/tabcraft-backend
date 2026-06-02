@@ -16,22 +16,35 @@ app.add_middleware(
 
 
 def split_long_segment(text, start, end):
-    """Split a long Whisper segment into ~8-word lyric lines."""
+    """Split a long Whisper segment into lyric lines, respecting punctuation."""
+    import re
     words = text.split()
-    if len(words) <= 10:
+    if len(words) <= 14:
         return [{"start": start, "end": end, "text": text.strip()}]
-    chunk_size = 8
-    parts = []
-    for i in range(0, len(words), chunk_size):
-        chunk = " ".join(words[i:i+chunk_size]).strip()
-        if chunk:
-            parts.append(chunk)
-    if not parts:
+
+    # First try splitting on sentence-ending punctuation
+    parts = [p.strip() for p in re.split(r"(?<=[.!?,;])\s+", text) if p.strip()]
+
+    # If no punctuation splits or parts still too long, split by word count
+    final_parts = []
+    for part in parts:
+        if len(part.split()) > 14:
+            chunk_size = 10
+            part_words = part.split()
+            for i in range(0, len(part_words), chunk_size):
+                chunk = " ".join(part_words[i:i+chunk_size]).strip()
+                if chunk:
+                    final_parts.append(chunk)
+        else:
+            final_parts.append(part)
+
+    if not final_parts:
         return [{"start": start, "end": end, "text": text.strip()}]
-    seg_dur = (end - start) / len(parts)
+
+    seg_dur = (end - start) / len(final_parts)
     return [
         {"start": start + i * seg_dur, "end": start + (i+1) * seg_dur, "text": p}
-        for i, p in enumerate(parts)
+        for i, p in enumerate(final_parts)
     ]
 
 
@@ -82,6 +95,7 @@ def transcribe_audio(audio_path):
                 condition_on_previous_text=False,
                 no_speech_threshold=0.8,
                 vad_filter=False,
+                max_new_tokens=128,
             )
             for seg in segs_iter:
                 text = seg.text.strip()
@@ -105,7 +119,7 @@ def transcribe_audio(audio_path):
     # Split long segments into lyric lines
     segments = []
     for seg in all_segments:
-        if len(seg["text"].split()) > 10:
+        if len(seg["text"].split()) > 14:
             segments.extend(split_long_segment(seg["text"], seg["start"], seg["end"]))
         else:
             segments.append(seg)
