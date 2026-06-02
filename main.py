@@ -1,6 +1,9 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import tempfile, os
+import tempfile, os, httpx
+
+ANTHROPIC_API = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 app = FastAPI()
 
@@ -15,82 +18,10 @@ app.add_middleware(
 )
 
 
-def detect_chords_librosa(audio_path: str) -> list:
-    """
-    Detect chords using librosa chroma features.
-    Returns list of (time_seconds, chord_name) tuples.
-    """
-    import librosa
-    import numpy as np
-
-    y, sr = librosa.load(audio_path, mono=True)
-    
-    # Use hop_length for ~0.5 second resolution
-    hop_length = sr // 2
-    
-    # Chroma features — energy per pitch class over time
-    chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length)
-    
-    note_names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-    
-    # Chord templates: major and minor triads for all 12 roots
-    def make_templates():
-        templates = {}
-        for root in range(12):
-            # Major: root, major third (+4), fifth (+7)
-            major = [0] * 12
-            major[root % 12] = 1
-            major[(root + 4) % 12] = 1
-            major[(root + 7) % 12] = 1
-            templates[note_names[root]] = np.array(major, dtype=float)
-            
-            # Minor: root, minor third (+3), fifth (+7)
-            minor = [0] * 12
-            minor[root % 12] = 1
-            minor[(root + 3) % 12] = 1
-            minor[(root + 7) % 12] = 1
-            templates[note_names[root] + 'm'] = np.array(minor, dtype=float)
-        return templates
-
-    templates = make_templates()
-    
-    # Match each chroma frame to best chord
-    n_frames = chroma.shape[1]
-    chord_sequence = []
-    prev_chord = None
-
-    for i in range(n_frames):
-        frame = chroma[:, i]
-        if frame.max() < 0.1:  # silence
-            continue
-        
-        frame_norm = frame / (frame.max() + 1e-6)
-        
-        best_chord = None
-        best_score = -1
-        for chord_name, template in templates.items():
-            score = float(np.dot(frame_norm, template))
-            if score > best_score:
-                best_score = score
-                best_chord = chord_name
-        
-        time = librosa.frames_to_time(i, sr=sr, hop_length=hop_length)
-        
-        # Only add if chord changed
-        if best_chord != prev_chord:
-            chord_sequence.append((float(time), best_chord))
-            prev_chord = best_chord
-
-    return chord_sequence
-
-
 def transcribe_audio(audio_path: str) -> dict:
-    """Transcribe audio using faster-whisper."""
     from faster_whisper import WhisperModel
-    
     model = WhisperModel("base", device="cpu", compute_type="int8")
     segments_iter, info = model.transcribe(audio_path, beam_size=5)
-    
     segments = []
     for seg in segments_iter:
         text = seg.text.strip()
@@ -100,111 +31,146 @@ def transcribe_audio(audio_path: str) -> dict:
                 "end": float(seg.end),
                 "text": text
             })
-    
     return {"segments": segments, "language": info.language}
 
 
 def detect_key_and_tempo(audio_path: str) -> dict:
-    """Detect key and tempo using librosa."""
     import librosa
     import numpy as np
-
     y, sr = librosa.load(audio_path)
-    
-    # Tempo
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    
-    # Key detection
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
     chroma_mean = chroma.mean(axis=1)
     key_idx = int(chroma_mean.argmax())
     note_names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-    
     major_profile = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
     minor_profile = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
-    
     major_corr = float(np.corrcoef(chroma_mean, np.roll(major_profile, key_idx))[0, 1])
     minor_corr = float(np.corrcoef(chroma_mean, np.roll(minor_profile, key_idx))[0, 1])
-    
     mode = "Major" if major_corr > minor_corr else "Minor"
-    
     return {
         "key": f"{note_names[key_idx]} {mode}",
         "tempo": f"{int(round(float(tempo)))} BPM"
     }
 
 
-def align_chords_to_lyrics(segments, chord_sequence):
-    """Place the most relevant chord above each lyric line."""
+def group_lyrics_into_sections(segments):
+    """Group whisper segments into sections based on gaps."""
     sections = []
-    current_lines = []
+    current = []
     prev_end = 0
+    for seg in segments:
+        if seg["start"] - prev_end > 2.0 and current:
+            sections.append(current)
+            current = []
+        current.append(seg["text"])
+        prev_end = seg["end"]
+    if current:
+        sections.append(current)
+    return sections
 
-    for segment in segments:
-        seg_start = segment["start"]
-        seg_end = segment["end"]
-        lyrics = segment["text"].strip()
-        if not lyrics:
-            continue
 
-        # Find all chords active during this segment
-        seg_chords = []
-        for (chord_time, chord_name) in chord_sequence:
-            if seg_start <= chord_time < seg_end:
-                seg_chords.append(chord_name)
-        
-        # Also include last chord before segment start (still ringing)
-        if not seg_chords:
-            before = [(t, c) for (t, c) in chord_sequence if t <= seg_start]
-            if before:
-                seg_chords = [before[-1][1]]
+def add_chords_with_claude(title, key, tempo, sections_lyrics):
+    """Use Claude to intelligently assign chords to each lyric line."""
+    if not ANTHROPIC_KEY:
+        # No API key — return lyrics without chords
+        return [
+            {
+                "name": ["Verse 1","Chorus","Verse 2","Chorus","Bridge","Outro"][min(i,5)],
+                "lines": [{"chords": "", "lyrics": line} for line in lines]
+            }
+            for i, lines in enumerate(sections_lyrics)
+        ]
 
-        # Deduplicate consecutive
-        unique = []
-        for c in seg_chords:
-            if not unique or unique[-1] != c:
-                unique.append(c)
+    # Build lyrics text for Claude
+    lyrics_text = ""
+    section_names = ["Verse 1","Chorus","Verse 2","Chorus","Bridge","Outro"]
+    for i, lines in enumerate(sections_lyrics):
+        name = section_names[i] if i < len(section_names) else f"Section {i+1}"
+        lyrics_text += f"[{name}]\n"
+        for line in lines:
+            lyrics_text += f"{line}\n"
+        lyrics_text += "\n"
 
-        # Build chord line spaced over lyric
-        if unique:
-            lyric_len = max(len(lyrics) + 4, 40)
-            if len(unique) == 1:
-                chord_line = unique[0]
+    prompt = f"""You are a guitarist. Add guitar chords to this song's lyrics.
+
+Song: "{title}"
+Key: {key}
+Tempo: {tempo}
+
+Rules:
+- Use only 3-5 common chords that fit the key (e.g. for G Major use G, Em, C, D)
+- Place chord names on a line ABOVE the lyric line they apply to
+- Chords should change every 1-2 lines typically, not every word
+- Keep it simple and playable — like a real singer-songwriter tab
+- Return ONLY the tab with chords and lyrics, no explanation
+
+{lyrics_text}"""
+
+    try:
+        import httpx
+        response = httpx.post(
+            ANTHROPIC_API,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": ANTHROPIC_KEY,
+                "anthropic-version": "2023-06-01"
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 2000,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=30.0
+        )
+        data = response.json()
+        raw = data["content"][0]["text"].strip()
+
+        # Parse the response back into sections/lines
+        result_sections = []
+        current_section = None
+        current_lines = []
+        pending_chord = ""
+
+        for line in raw.split("\n"):
+            line = line.rstrip()
+            if line.startswith("[") and line.endswith("]"):
+                if current_section and current_lines:
+                    result_sections.append({"name": current_section, "lines": current_lines})
+                current_section = line[1:-1]
+                current_lines = []
+                pending_chord = ""
+            elif not current_section:
+                continue
             else:
-                spacing = max(lyric_len // len(unique), 6)
-                chord_line = "".join(c.ljust(spacing) for c in unique).rstrip()
-        else:
-            chord_line = ""
+                # Detect if line is mostly chords (short words, no common words)
+                words = line.split()
+                common_words = {"the","and","i","a","to","of","in","is","it","you","that","was","for","on","are","with","he","as","at","be","by","from","or","an","but","not","this","his","they","have","had","what","were","when","we","there","can","if","no","do","my","so","up","out","about","who","get","which","go","me","she","her","him","them","their","all","said","she'd","he'd","they'd","we'd","i'd","i'm","you're","it's"}
+                is_chord_line = len(words) > 0 and len(words) <= 8 and all(
+                    len(w) <= 4 and w[0].isupper() and w.lower() not in common_words
+                    for w in words if w
+                )
+                if is_chord_line and line.strip():
+                    pending_chord = line.strip()
+                elif line.strip():
+                    current_lines.append({"chords": pending_chord, "lyrics": line.strip()})
+                    pending_chord = ""
 
-        # New section if gap > 1.5s
-        if seg_start - prev_end > 1.5 and current_lines:
-            sections.append(current_lines)
-            current_lines = []
+        if current_section and current_lines:
+            result_sections.append({"name": current_section, "lines": current_lines})
 
-        current_lines.append({"chords": chord_line, "lyrics": lyrics})
-        prev_end = seg_end
+        return result_sections if result_sections else None
 
-    if current_lines:
-        sections.append(current_lines)
-
-    # Name sections
-    section_names = ["Verse 1", "Chorus", "Verse 2", "Chorus", "Bridge", "Outro"]
-    return [
-        {
-            "name": section_names[i] if i < len(section_names) else f"Section {i+1}",
-            "lines": lines
-        }
-        for i, lines in enumerate(sections)
-    ]
+    except Exception as e:
+        print(f"Claude chord error: {e}")
+        return None
 
 
 def detect_strumming(tempo_bpm: str) -> dict:
-    """Suggest a strumming pattern based on tempo."""
     try:
         bpm = int(tempo_bpm.replace(" BPM", ""))
     except:
         bpm = 90
-    
     if bpm < 70:
         return {"pattern": "D   D   D   D", "description": "Slow, deliberate downstrokes"}
     elif bpm < 100:
@@ -219,11 +185,9 @@ def detect_strumming(tempo_bpm: str) -> dict:
 def root():
     return {"status": "TabCraft API running"}
 
-
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
 
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...)):
@@ -235,24 +199,33 @@ async def analyze(file: UploadFile = File(...)):
     try:
         song_title = os.path.splitext(file.filename)[0]\
             .replace("-", " ").replace("_", " ")\
-            .replace("(MP3)", "").replace("(WAV)", "")\
-            .strip()
+            .replace("(MP3)", "").replace("(WAV)", "").strip()
 
-        print(f"Transcribing: {file.filename}")
+        print("Transcribing...")
         transcription = transcribe_audio(tmp_path)
         segments = transcription.get("segments", [])
-        print(f"Got {len(segments)} segments")
+        print(f"{len(segments)} segments")
 
-        print("Detecting chords...")
-        chord_sequence = detect_chords_librosa(tmp_path)
-        print(f"Got {len(chord_sequence)} chord changes")
-
-        print("Detecting key and tempo...")
+        print("Detecting key/tempo...")
         key_tempo = detect_key_and_tempo(tmp_path)
-        print(f"Key: {key_tempo['key']}, Tempo: {key_tempo['tempo']}")
+        print(f"{key_tempo}")
 
-        print("Aligning chords to lyrics...")
-        sections = align_chords_to_lyrics(segments, chord_sequence)
+        print("Grouping lyrics...")
+        sections_lyrics = group_lyrics_into_sections(segments)
+
+        print("Adding chords with Claude...")
+        sections = add_chords_with_claude(song_title, key_tempo["key"], key_tempo["tempo"], sections_lyrics)
+
+        # Fallback: no chords, just lyrics in sections
+        if not sections:
+            section_names = ["Verse 1","Chorus","Verse 2","Chorus","Bridge","Outro"]
+            sections = [
+                {
+                    "name": section_names[i] if i < len(section_names) else f"Section {i+1}",
+                    "lines": [{"chords": "", "lyrics": line} for line in lines]
+                }
+                for i, lines in enumerate(sections_lyrics)
+            ]
 
         strum = detect_strumming(key_tempo["tempo"])
 
@@ -264,17 +237,14 @@ async def analyze(file: UploadFile = File(...)):
             "capo": "No capo",
             "strummingPattern": strum["pattern"],
             "strummingDescription": strum["description"],
-            "sections": sections if sections else [{
-                "name": "Verse 1",
-                "lines": [{"chords": "", "lyrics": "(No lyrics detected — check audio quality)"}]
-            }],
-            "notes": f"Chords detected automatically from audio — verify by ear and adjust as needed."
+            "sections": sections,
+            "notes": "Chords suggested by AI based on key — verify by ear and adjust as needed."
         }
 
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Analysis error: {e}")
+        print(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         os.unlink(tmp_path)
